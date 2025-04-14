@@ -1,0 +1,12 @@
+services:
+  {AGENT_NAME}:
+    container_name: watsonx-{AGENT_NAME}
+    image: watsonx-{AGENT_NAME}:latest
+    # tty: true
+    build: .
+    volumes:
+      - ./app:/app
+    ports:
+      - "{HOST_PORT}:{AGENT_PORT}"
+    env_file:
+      - ./.env
