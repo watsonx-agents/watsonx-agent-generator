@@ -240,149 +240,7 @@ def create_main_file(configs: Configs) -> None:
     app_logger.info(f"Copying main file from `{configs.from_path}` to `{configs.to_path}`")
     copy_and_substitute(configs.from_path, configs.to_path, AGENT_NAME=configs.agent_name)
 
-def initialize_git(path: Path | str, agent_name: str, author_name: str, author_email: str) -> None:
-    """
-    Initializes a Git repository, creates an initial commit, and sets the remote origin.
-    Before committing, it verifies if the repository’s local Git configuration
-    for user.name and user.email are set. If not, it sets them using the provided author details.
-    """
-    app_logger.info(f"Initializing GIT repository for agent '{agent_name}' in {path}")
 
-    # Initialize the git repository
-    execute_command("git init", cwd=path)
-
-    # Configure local Git user.name if not already set
-    try:
-        result = subprocess.run(["git", "config", "--local", "user.name"], cwd=path, capture_output=True, text=True)
-        if not result.stdout.strip():
-            app_logger.info("Git user.name not set locally. Configuring Git user.name...")
-            execute_command(f'git config user.name "{author_name}"', cwd=path)
-    except Exception as e:
-        app_logger.error("Failed to check or set git user.name.")
-        app_logger.error(str(e))
-
-    # Configure local Git user.email if not already set
-    try:
-        result = subprocess.run(["git", "config", "--local", "user.email"], cwd=path, capture_output=True, text=True)
-        if not result.stdout.strip():
-            app_logger.info("Git user.email not set locally. Configuring Git user.email...")
-            execute_command(f'git config user.email "{author_email}"', cwd=path)
-    except Exception as e:
-        app_logger.error("Failed to check or set git user.email.")
-        app_logger.error(str(e))
-
-    # Make the first commit
-    execute_command("git add .", cwd=path)
-    execute_command("git commit -m 'Created agent with agent_creator script'", cwd=path)
-
-    # Set the remote origin URL for the agent
-    agent_repo_url = f"https://github.com/watsonx-agents/agent_{agent_name}.git"
-    app_logger.info(f"Setting remote origin to '{agent_repo_url}'")
-    try:
-        execute_command(f"git remote add origin {agent_repo_url}", cwd=path)
-    except Exception as e:
-        app_logger.error("Failed to set remote origin. It might already exist.")
-        app_logger.error(str(e))
-
-def create_repository(agent_name: str, agent_path: Path, description: str = None, make_private: bool = False) -> None:
-    app_logger.info("Initializing repository creation...")
-    repo_name = f"agent_{agent_name}"
-    org_name = "watsonx-agents"
-    default_description = f"Agent of {agent_name} for WatsonX Platform CIC"
-    repo_description = description or default_description
-
-    # GitHub API endpoint for creating a repository in an organization
-    url = f"https://api.github.com/orgs/{org_name}/repos"
-    repo_url = f"https://github.com/{org_name}/{repo_name}.git"
-    # Load environment variables from .env file
-    load_dotenv()
-    # Get the GitHub token from environment or .env file
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        token = input("GitHub token not found in environment or .env file. Please enter your GitHub token: ").strip()
-
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    # Step 1: Check if repository already exists
-    check_repo_url = f"https://api.github.com/repos/{org_name}/{repo_name}"
-    repo_exists = False
-    try:
-        response = requests.get(check_repo_url, headers=headers)
-        if response.status_code == 200:
-            app_logger.info("Repository already exists on GitHub.")
-            repo_exists = True
-        elif response.status_code != 404:
-            response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        app_logger.error("Failed to check if GitHub repository exists.")
-        app_logger.error(e)
-        return
-
-    # Step 2: Create the repository if it doesn’t exist
-    if not repo_exists:
-        try:
-            data = {
-                "name": repo_name,
-                "description": repo_description,
-                "private": make_private,
-                "auto_init": False,
-            }
-            response = requests.post(url, headers=headers, data=json.dumps(data))
-            response.raise_for_status()
-            app_logger.info("GitHub repository created successfully.")
-        except requests.exceptions.RequestException as e:
-            app_logger.error("Failed to create GitHub repository.")
-            app_logger.error(e)
-            return
-
-    # Step 3: Initialize and push to GitHub
-    try:
-        # Check if initial commit exists, create one if necessary
-        result = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=agent_path, capture_output=True, text=True)
-        if result.returncode != 0:
-            app_logger.info("No commits found. Creating an initial commit.")
-            subprocess.run(["git", "add", "."], cwd=agent_path, check=True)
-            subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=agent_path, check=True)
-
-        # Add remote 'origin' if it doesn’t already exist
-        result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=agent_path, capture_output=True, text=True)
-        if result.returncode != 0:
-            app_logger.info("Adding remote origin...")
-            subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=agent_path, check=True)
-
-        # Step 4: Determine default branch (master or main)
-        branch_name = "main"
-        result = subprocess.run(["git", "branch", "--show-current"], cwd=agent_path, capture_output=True, text=True)
-        if result.stdout.strip() == "master":
-            branch_name = "master"
-
-        # Push to the correct branch and set upstream
-        app_logger.info(f"Pushing local repository to GitHub on branch '{branch_name}'...")
-        subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], cwd=agent_path, check=True)
-        app_logger.info("Your new agent was pushed successfully.")
-
-    except subprocess.CalledProcessError as e:
-        app_logger.error("Failed to execute Git command.")
-        app_logger.error(e)
-
-def create_repository_wrapper(arguments: Arguments) -> None:
-    push_to_github = input("Would you like to push the new agent to GitHub? [Y/n]: ").strip().lower()
-    if push_to_github in ["", "y", "yes"]:
-        description = input("Provide a description for the repository (leave blank for default): ").strip() or None
-        make_private = input("Would you like to make the repository private? [n/Y]: ").strip().lower() in ["y", "yes"]
-        create_repository(arguments.agent_name, Path(arguments.agent_path) / arguments.agent_name, description, make_private)
-
-        # Update agents.json with the new agent details
-        base_path = Path(arguments.agent_path)
-        update_agents_json(
-            agent_name=arguments.agent_name,
-            agent_port=arguments.agent_port,
-            agent_description=description or f"Agent of {arguments.agent_name} for WatsonX Platform CIC",
-            base_path=base_path
-        )
 
 def update_agents_json(agent_name: str, agent_port: int, agent_description: str, base_path: Path) -> None:
     """
@@ -506,12 +364,6 @@ def create_project(arguments: Arguments) -> None:
     execute_command(f"isort {agent_poetry_real_folder}")
     execute_command(f"black {agent_poetry_real_folder}")
 
-    # Ensure default author values if not provided
-    if not arguments.author_name:
-        arguments.author_name = "IBM Platform"
-    if not arguments.author_email:
-        arguments.author_email = "noreply@ibm.com"
-    initialize_git(agent_folder, arguments.agent_name, arguments.author_name, arguments.author_email)
 
 def main():
     try:
@@ -527,7 +379,7 @@ def main():
         create_project(arguments)
         app_logger.info(f"Success! Agent {arguments.agent_name} created in {arguments.agent_path}")
 
-        create_repository_wrapper(arguments)
+ 
 
     except KeyboardInterrupt:
         app_logger.info("\nExiting...")
