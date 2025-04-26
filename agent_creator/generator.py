@@ -1,95 +1,142 @@
+## `agent_creator/generator.py`
+# -*- coding: utf-8 -*-
+"""
+agent_creator.generator
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Rewrite an agent’s Python source for a new task using IBM Watsonx.ai.
+
+Highlights
+----------
+* Reads env vars (WATSONX_APIKEY, WATSONX_URL, PROJECT_ID) from `.env`.
+* Works with *all* known Watsonx SDK versions:
+  - Uses `APIClient.foundation_model` when available.
+  - Falls back to `ModelInference` when it is not.
+* Handles both object- and string-style responses.
+"""
+
 import os
-from pathlib import Path
 from dotenv import load_dotenv
 
-# These imports assume you have a WatsonX.ai client library installed.
-# You may need to adjust these imports based on your actual WatsonX.ai SDK.
 from ibm_watsonx_ai import APIClient, Credentials
-from ibm_watsonx_ai.foundation_models import ModelInference
 from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
+
+
+def _initialise_model(client: APIClient,
+                      credentials: Credentials,
+                      project_id: str,
+                      model_id: str):
+    """
+    Return a model instance that exposes `.generate_text()` no matter which
+    Watsonx-AI SDK build is installed.
+    """
+    try:
+        # SDK ≥ 1.5.0
+        return client.foundation_model(model_id)
+    except AttributeError:
+        # Older builds → fall back to ModelInference
+        from ibm_watsonx_ai.foundation_models import ModelInference
+
+        return ModelInference(
+            model_id=model_id,
+            credentials=credentials,
+            project_id=project_id,
+        )
+
 
 def generate_agent(current_agent_code: str, task_description: str) -> str:
     """
-    Generates updated Python code for the agent using WatsonX.ai,
-    based on an existing code structure and a new task description.
-
-    Args:
-        current_agent_code (str): The current Python code of the agent.
-        task_description (str): The new task description for the agent.
-
-    Returns:
-        str: The updated Python code for the agent.
+    Return Python source so the agent can accomplish *task_description* while
+    preserving the original structure.  Returns ``None`` on failure.
     """
-    # Load environment variables from .env
+    # ------------------------------------------------------------------ 1
+    # Load credentials
+    # ----------------------------------------------------------------------
     load_dotenv()
 
-    # Retrieve necessary credentials
     api_key = os.getenv("WATSONX_APIKEY")
-    url = os.getenv("WATSONX_URL")
-    project_id = os.getenv("PROJECT_ID")
+    url      = os.getenv("WATSONX_URL") or "https://us-south.ml.cloud.ibm.com"
+    project  = os.getenv("PROJECT_ID")
 
     if not api_key:
         raise ValueError("WATSONX_APIKEY is missing or empty.")
     if not url:
         raise ValueError("WATSONX_URL is missing or empty.")
-    if not project_id:
+    if not project:
         raise ValueError("PROJECT_ID is missing or empty.")
 
-    # Set up credentials and client
-    credentials = Credentials(
-        url=url,
-        api_key=api_key
-    )
-    client = APIClient(credentials=credentials, project_id=project_id)
+    # ------------------------------------------------------------------ 2
+    # Initialise client & model
+    # ----------------------------------------------------------------------
+    credentials = Credentials(url=url, api_key=api_key)
+    client      = APIClient(credentials=credentials, project_id=project)
 
     model_id = "ibm/granite-13b-instruct-v2"
+    model    = _initialise_model(client, credentials, project, model_id)
 
-    # Construct prompt instructing the model to modify the code while keeping the original structure intact
-    prompt = f"""You are an expert Python code generator specializing in updating agent LLM code.
-You will be provided with the current Python code of an agent and a description of a new task it needs to perform.
-Your goal is to modify the existing code to incorporate the new task while strictly maintaining the original structure and ensuring the code remains runnable.
+    # ------------------------------------------------------------------ 3
+    # Build prompt
+    # ----------------------------------------------------------------------
+    prompt = f"""
+You are an expert Python code generator specialising in *refactoring* existing
+agent code-bases while keeping the public interface stable.
 
-Here is the current Python code of the agent:
+Current code
+------------
+```python
 {current_agent_code}
+```
 
-Based on this, please modify the code so that the agent can perform the following task:
-"{task_description}"
+New requirement
+---------------
+The agent must additionally be able to:
 
-Ensure that you:
-- Do not drastically change the overall structure of the provided code.
-- Maintain existing classes, functions, and import statements unless absolutely necessary.
-- Integrate the new task within the existing framework.
-Return the complete updated Python code as a single string.
+    “{task_description}”
+
+Return **only** the complete, runnable Python source (no markdown fences,
+no commentary).
 """
 
-    # Define generation parameters
+    # ------------------------------------------------------------------ 4
+    # Generation parameters
+    # ----------------------------------------------------------------------
     parameters = {
+        GenParams.MAX_NEW_TOKENS: 1_024,
+        GenParams.TEMPERATURE:    0.20,
         GenParams.DECODING_METHOD: "greedy",
-        GenParams.MAX_NEW_TOKENS: 1000,  # Adjust as needed
-        GenParams.TEMPERATURE: 0.3,
     }
 
-    model = ModelInference(
-        model_id=model_id,
-        credentials=credentials,
-        project_id=project_id
-    )
-
+    # ------------------------------------------------------------------ 5
+    # Call the model
+    # ----------------------------------------------------------------------
     try:
-        response = model.generate_text(
-            prompt=prompt,
-            params=parameters
-        )
-        # Return the generated code from the response
-        return response.get_result()
-    except Exception as e:
-        print(f"An error occurred during code generation: {e}")
+        response = model.generate_text(prompt=prompt, params=parameters)
+
+        # SDKs differ in return type
+        if hasattr(response, "get_result"):
+            return response.get_result()
+        if isinstance(response, str):
+            return response
+
+        # Fallback – stringify any other object
+        return str(response)
+
+    except Exception as exc:  # pragma: no cover
+        print(f"[generator] Error during code generation: {exc}")
         return None
 
-if __name__ == "__main__":
-    # For testing purposes, example usage:
-    with open("example_agent.py", "r", encoding="utf-8") as f:
-        current_code = f.read()
-    new_task = "The agent should summarize and analyze user input, then respond with a concise summary."
-    updated = generate_agent(current_code, new_task)
+
+# ---------------------------------------------------------------------- 6
+# Quick CLI test
+# --------------------------------------------------------------------------
+if __name__ == "__main__":  # pragma: no cover
+    TEST_FILE = "example_agent.py"
+    if not os.path.exists(TEST_FILE):
+        print(f"Place a sample agent in {TEST_FILE} for the smoke test.")
+        exit(1)
+
+    with open(TEST_FILE, "r", encoding="utf-8") as fh:
+        original = fh.read()
+
+    updated = generate_agent(original, "Say hello world")
     print(updated)

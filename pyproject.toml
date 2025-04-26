@@ -4,20 +4,19 @@ version = "0.2.0"
 description = ""
 authors = [
     "Ruslan Magana Vsevolodovna <Ruslan.Idelfonso.Magana.Vsevolodovna-cic@ibm.com>",
-
 ]
 readme = "README.md"
 packages = [{ include = "agent_creator", from = "." }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<4.0"
+python = ">=3.10,<3.13"  # <-- Restrict to Python versions supported by ibm-watsonx-ai
 isort = "^5.13.2"
 black = "^24.10.0"
 python-dotenv = "^1.0.1"
 python-dateutil = "^2.9.0.post0"
 toml = "^0.10.2"
 langgraph = { version = "^0.3.27", python = ">=3.9,<4.0" }
-ibm-watsonx-ai = "^1.1.0" # <--- Add this line (adjust version as needed)
+ibm-watsonx-ai = "^1.3.11"
 
 [build-system]
 requires = ["poetry-core"]

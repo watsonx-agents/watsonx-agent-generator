@@ -1,0 +1,4 @@
+[tool.poetry.dependencies]
+# BeeAI runtime
+beeai-framework = ">=0.1.14"
+python-dotenv    = ">=1.1.0"

@@ -1,9 +1,25 @@
+"""
+agent_creator.main
+~~~~~~~~~~~~~~~~~~
+
+CLI entry-point for creating a new agent package.  Key updates:
+
+* Agents now default to `./agents/` (not `../src/agents/`).
+* Environment template falls back to `.env_template` if
+  `assets/.env.sample` is missing.
+* Watsonx-based code customisation is robust to SDK response types.
+"""
+
 import os
 import shutil
 from pathlib import Path
 from traceback import format_exc
 
-from agent_creator.configs import ASSETS_FOLDER, Logger
+from agent_creator.configs import (
+    ASSETS_FOLDER,
+    Logger,
+    DEFAULT_AGENT_BASE_PATH,
+)
 from agent_creator.models import (
     Arguments,
     Compose,
@@ -17,16 +33,26 @@ from agent_creator.models import (
 from agent_creator.parameters import parse_arguments
 from agent_creator.utils import copy_and_substitute, execute_command
 
-import subprocess  # For running git config commands
-import toml
-import requests
-import json
-from dotenv import load_dotenv
-
-# Import the generate_agent function from the generator module
 from agent_creator.generator import generate_agent
 
+import sys
+import tomlkit                    # add to your project if not already present
+
+from agent_creator.configs import ASSETS_FOLDER, Logger
+from agent_creator.utils import execute_command
+
 app_logger = Logger("application").logger
+app_logger = Logger("application").logger
+
+def _folder_from_framework(name: str) -> str:
+    """Convert user choice to folder slug used under assets/frameworks/."""
+    return "base" if name.lower() == "no framework" else name.split()[0].lower()
+
+
+
+# --------------------------------------------------------------------------- #
+# Dependencies that are added to each generated Poetry project
+# --------------------------------------------------------------------------- #
 dependencies: list[str] = [
     "isort",
     "black",
@@ -39,123 +65,121 @@ dependencies: list[str] = [
     "python-dateutil",
 ]
 
-# -----------------------------------------------------------------------------
-# New Framework Selection and Customization Functions
-# -----------------------------------------------------------------------------
-def select_framework():
+# --------------------------------------------------------------------------- #
+# 1 · Framework selection & optional model customisation
+# --------------------------------------------------------------------------- #
+def select_framework() -> str:
     options = [
-        'watsonx sdk',
-        'beeai',
-        'langraph',
-        'crewai',
-        'langflow',
-        'no framework'
+        "watsonx sdk",
+        "beeai",
+        "langraph",
+        "crewai",
+        "langflow",
+        "no framework",
     ]
-    
-    print("Select a framework from the following options:")
-    for idx, option in enumerate(options, 1):
-        print(f"{idx}. {option}")
-        
-    choice = input("Enter the number corresponding to your choice: ")
-    
+    print("Select a framework:")
+    for idx, name in enumerate(options, 1):
+        print(f"{idx}. {name}")
+
     try:
-        index = int(choice) - 1
-        if index < 0 or index >= len(options):
-            raise ValueError
-        return options[index]
-    except ValueError:
-        print("Invalid input. Please run the script again and provide a valid number.")
+        idx = int(input("Enter the number corresponding to your choice: ")) - 1
+        return options[idx]
+    except Exception:  # pragma: no cover
+        print("Invalid input — exiting.")
         exit(1)
 
-def setup_framework(selected_framework):
-    # The base directory for the frameworks is inside assets/frameworks
-    project_root = os.getcwd()
-    frameworks_dir = os.path.join(project_root, 'assets', 'frameworks')
-    os.makedirs(frameworks_dir, exist_ok=True)
-    
-    # Define the source model folder (assumed to be assets/model)
-    source_model_path = os.path.join(project_root, 'assets', 'model')
-    if not os.path.exists(source_model_path):
-        print(f"Source model folder does not exist at {source_model_path}.")
+
+def setup_framework(selected_framework: str) -> None:
+    """Copy the baseline model template into assets/frameworks/<name>/model."""
+    project_root = Path.cwd()
+    frameworks_dir = project_root / "assets" / "frameworks"
+    frameworks_dir.mkdir(parents=True, exist_ok=True)
+
+    source_model_path = project_root / "assets" / "model"
+    if not source_model_path.exists():  # pragma: no cover
+        print(f"Cannot find template model in {source_model_path}")
         exit(1)
-    
-    # Normalize destination folder name: "no framework" becomes "base"
-    if selected_framework.lower() == "no framework":
-        dest_folder = "base"
-    else:
-        dest_folder = selected_framework.split()[0].lower()
-    
-    # Destination directory: assets/frameworks/<dest_folder>/model
-    destination_model_dir = os.path.join(frameworks_dir, dest_folder, 'model')
-    os.makedirs(destination_model_dir, exist_ok=True)
-    
-    # Copy each file from the original model directory to the destination directory
-    for item in os.listdir(source_model_path):
-        s = os.path.join(source_model_path, item)
-        d = os.path.join(destination_model_dir, item)
-        if os.path.isdir(s):
-            shutil.copytree(s, d, dirs_exist_ok=True)
-        else:
-            shutil.copy2(s, d)
-    
-    print(f"Model files have been copied to {destination_model_dir}.")
 
-def customize_model(selected_framework):
-    """
-    Prompt the user for a new task description to update the agent code
-    using generator.py. The updated code is written to agent_custom.py.
-    """
-    answer = input("Would you like to customize the model? [Y/n]: ").strip().lower()
-    if answer in ["", "y", "yes"]:
-        # Determine the framework destination folder (use same normalization as in setup_framework)
-        if selected_framework.lower() == "no framework":
-            dest_folder = "base"
-        else:
-            dest_folder = selected_framework.split()[0].lower()
-        
-        # Load the respective agent.py code from assets/frameworks/<dest_folder>/model
-        framework_agent_path = os.path.join(
-            os.getcwd(),
-            "assets", "frameworks", dest_folder, "model", "agent.py"
-        )
-        if not os.path.exists(framework_agent_path):
-            print(f"Agent file not found at {framework_agent_path}!")
-            return
-        
-        with open(framework_agent_path, "r", encoding="utf-8") as f:
-            framework_agent_code = f.read()
-        
-        # Ask the user for the new task description for the agent
-        prompt_text = (
-            f"You have selected the framework '{selected_framework}'.\n"
-            "Please provide the new task description for the agent (currently supports single agents): "
-        )
-        task_description = input(prompt_text)
-        
-        # Generate the updated code using generator.py's generate_agent function
-        updated_code = generate_agent(framework_agent_code, task_description)
-        if not updated_code:
-            print("Agent code generation failed.")
-            return
-        
-        # Write the updated code to agent_custom.py in the project root
-        custom_agent_path = os.path.join(os.getcwd(), "agent_custom.py")
-        with open(custom_agent_path, "w", encoding="utf-8") as f:
-            f.write(updated_code)
-        
-        print(f"Customized agent code has been created at: {custom_agent_path}")
-    else:
-        print("Model customization skipped.")
+    dest_folder = (
+        "base" if selected_framework.lower() == "no framework"
+        else selected_framework.split()[0].lower()
+    )
+    destination_model_dir = frameworks_dir / dest_folder / "model"
+    destination_model_dir.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------------------------------------------------------
-# Existing Functions for Creating Project Files
-# -----------------------------------------------------------------------------
+    for item in source_model_path.iterdir():
+        target = destination_model_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
+
+    print(f"Model files copied to {destination_model_dir}")
+
+
+def customize_model(selected_framework: str) -> None:
+    """Call Watsonx to patch the agent template for a new task."""
+    ans = input("Would you like to customise the model? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print("Model customisation skipped.")
+        return
+
+    dest_folder = (
+        "base" if selected_framework.lower() == "no framework"
+        else selected_framework.split()[0].lower()
+    )
+    agent_path = (
+        Path.cwd() / "assets" / "frameworks" / dest_folder / "model" / "agent.py"
+    )
+    if not agent_path.exists():  # pragma: no cover
+        print(f"Cannot find {agent_path}")
+        return
+
+    current_code = agent_path.read_text(encoding="utf-8")
+    task_description = input(
+        f"You selected ‘{selected_framework}’\n"
+        "Describe the new task the agent must perform: "
+    )
+
+    try:
+        updated = generate_agent(current_code, task_description)
+    except Exception as exc:  # pragma: no cover
+        print(f"Customisation failed: {exc}")
+        return
+
+    if not updated:
+        print("Agent code generation failed.")
+        return
+
+    (Path.cwd() / "agent_custom.py").write_text(updated, encoding="utf-8")
+    print("Customised agent code written to ./agent_custom.py")
+
+# --------------------------------------------------------------------------- #
+# 2 · Helpers that actually write out project files
+# --------------------------------------------------------------------------- #
+def create_env(env: Env) -> None:
+    """Create .env.sample + .env, falling back to .env_template if needed."""
+    app_logger.info(f"Creating .env in {env.to_path}")
+    sample = env.from_path
+    if not sample.exists():
+        fallback = Path(__file__).parent / ".env_template"
+        if not fallback.exists():  # pragma: no cover
+            raise FileNotFoundError("No .env sample or template available.")
+        sample = fallback
+
+    copy_and_substitute(sample, env.to_path, AGENT_PORT=env.agent_port)
+    shutil.copy2(env.to_path, env.to_path.with_suffix(""))  # write plain .env
+
+
 def create_dockerfile(dockerfile: Dockerfile) -> None:
-    app_logger.info(f"Creating Dockerfile in `{dockerfile.to_path}`")
-    copy_and_substitute(dockerfile.from_path, dockerfile.to_path, AGENT_NAME=dockerfile.agent_name)
+    app_logger.info(f"Creating Dockerfile → {dockerfile.to_path}")
+    copy_and_substitute(
+        dockerfile.from_path, dockerfile.to_path, AGENT_NAME=dockerfile.agent_name
+    )
+
 
 def create_compose(compose: Compose) -> None:
-    app_logger.info(f"Creating compose in `{compose.to_path}`")
+    app_logger.info(f"Creating compose → {compose.to_path}")
     copy_and_substitute(
         compose.from_path,
         compose.to_path,
@@ -164,188 +188,423 @@ def create_compose(compose: Compose) -> None:
         AGENT_NAME=compose.agent_name,
     )
 
+
 def create_readme(readme: Readme) -> None:
-    app_logger.info(f"Creating README.md in `{readme.to_path}`")
-    agent_name = " ".join(s.capitalize() for s in readme.agent_name.split("_"))
+    app_logger.info(f"Creating README.md → {readme.to_path}")
+    agent_title = " ".join(word.capitalize() for word in readme.agent_name.split("_"))
     copy_and_substitute(
         readme.from_path,
         readme.to_path,
-        AGENT_NAME=agent_name,
+        AGENT_NAME=agent_title,
         AGENT_PATH=readme.agent_path,
         HOST_PORT=readme.host_port,
     )
+    footer = f"\n## Author\n\n- {readme.author_name}"
+    if readme.author_email:
+        footer += f" <{readme.author_email}>"
+    with open(readme.to_path, "a", encoding="utf-8") as fh:
+        fh.write(footer)
 
-    # Set author name to default "IBM Platform" and use email if provided
-    author_name = "IBM Platform"
-    author_email = readme.author_email or ""
 
-    # Build the author content
-    author_content = f"\n## Author\n\n- {author_name}"
-    if author_email:
-        author_content += f" <[{author_email}](mailto:{author_email})>"
+def create_gitignore(src: ProjectFile) -> None:
+    app_logger.info(f"Creating .gitignore → {src.to_path}")
+    shutil.copy2(src.from_path, src.to_path)
 
-    with open(readme.to_path, "a", encoding="utf-8") as f:
-        f.write(author_content)
 
-def create_gitignore(file: ProjectFile) -> None:
-    app_logger.info(f"Creating .gitignore in `{file.to_path}`")
-    shutil.copy2(file.from_path, file.to_path)
+def create_poetry_old(poetry: Poetry) -> None:
+    """Initialise a poetry project and inject dependencies + author."""
+    app_logger.info(f"Initialising Poetry project in {poetry.base_path}")
+    project_dir = Path(poetry.base_path) / poetry.agent_name
+    execute_command(f"poetry new {project_dir}", cwd=poetry.base_path)
+    execute_command(f"poetry add {' '.join(dependencies)}", cwd=project_dir)
 
-def create_env(env: Env) -> None:
-    app_logger.info(f"Creating .env in `{env.to_path}`")
-    copy_and_substitute(env.from_path, env.to_path, AGENT_PORT=env.agent_port)
-    shutil.copy2(env.to_path, str(env.to_path).replace(".sample", ""))
+    pyproject = project_dir / "pyproject.toml"
+    if pyproject.exists():
+        import toml
 
-def create_poetry(poetry: Poetry) -> None:
-    app_logger.info(f"Creating poetry project in `{poetry.base_path}`")
+        data = toml.load(pyproject)
+        author = (
+            f"{poetry.author_name} <{poetry.author_email}>"
+            if poetry.author_email
+            else poetry.author_name
+        )
+        data["tool"]["poetry"]["authors"] = [author]
+        pyproject.write_text(toml.dumps(data), encoding="utf-8")
+        app_logger.info("Updated pyproject.toml author field.")
+    else:  # pragma: no cover
+        app_logger.error("pyproject.toml not found after ‘poetry new’!")
 
-    # Step 1: Create project using poetry new
-    project_path = Path(poetry.base_path) / poetry.agent_name
-    execute_command(f"poetry new {project_path}", cwd=poetry.base_path)
 
-    # Step 2: Add dependencies
-    app_logger.info("Adding dependencies")
-    execute_command(
-        f"poetry add {' '.join(dependencies)}",
-        cwd=project_path,
-    )
 
-    # Step 3: Update pyproject.toml with the correct author information
-    pyproject_file = project_path / "pyproject.toml"
-    if pyproject_file.exists():
-        pyproject_content = toml.load(pyproject_file)
 
-        # Add author information
-        author_info = f"{poetry.author_name} <{poetry.author_email}>" if poetry.author_email else poetry.author_name
-        pyproject_content['tool']['poetry']['authors'] = [author_info]
+# --------------------------------------------------------------------------- #
+def create_poetry_old3(poetry: Poetry, framework_folder: str | None = None) -> None:
+    """
+    Generate a complete Poetry project, compatible with Poetry ≥1.8:
 
-        # Write the updated configuration back to pyproject.toml
-        with open(pyproject_file, "w") as f:
-            toml.dump(pyproject_content, f)
+        • poetry new …
+        • patch [project]  + [tool.poetry]
+        • merge framework fragment
+        • add generic deps directly in TOML
+        • run `poetry lock`   (no --no-update flag)
+    """
+    import sys
+    import tomlkit
 
-        app_logger.info("Updated pyproject.toml with correct author information.")
+    project_dir = Path(poetry.base_path) / poetry.agent_name
+    app_logger.info("Initialising Poetry project in %s", project_dir)
+
+    # 1 - skeleton ------------------------------------------------------
+    execute_command(f"poetry new {project_dir}", cwd=poetry.base_path)
+    pyproject = project_dir / "pyproject.toml"
+
+    doc = tomlkit.parse(pyproject.read_text(encoding="utf-8"))
+
+    # 2 - tables --------------------------------------------------------
+    project_tbl = doc.setdefault("project", tomlkit.table())
+    tool_tbl    = doc.setdefault("tool",    tomlkit.table())
+    poetry_tbl  = tool_tbl.setdefault("poetry", tomlkit.table())
+
+    proj_deps = project_tbl.setdefault("dependencies", tomlkit.array())
+    po_deps   = poetry_tbl.setdefault("dependencies",  tomlkit.table())
+
+    # 3 - python & author ----------------------------------------------
+    host_py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    project_tbl["requires-python"] = f">={host_py},<4.0"
+    po_deps["python"]              = f">={host_py},<4.0"
+
+    author_it = tomlkit.inline_table()
+    author_it["name"]  = poetry.author_name
+    if poetry.author_email:
+        author_it["email"] = poetry.author_email
+    project_tbl["authors"] = [author_it]
+    poetry_tbl["authors"]  = [f"{poetry.author_name} <{poetry.author_email}>"]
+
+    # 4 - framework fragment -------------------------------------------
+    if framework_folder:
+        frag = (ASSETS_FOLDER / "frameworks" / framework_folder /
+                "pyproject.fragment.toml")
+        if frag.exists():
+            frag_doc  = tomlkit.parse(frag.read_text())
+            frag_deps = frag_doc["tool"]["poetry"].get("dependencies", {})
+            for name, spec in frag_deps.items():
+                proj_deps.append(f"{name} {spec}")
+            po_deps.update(frag_deps)
+
+            for sect, val in frag_doc["tool"].items():
+                if sect != "poetry":
+                    tool_tbl[sect] = val
+
+    # 5 - generic bundle (no langgraph here) ---------------------------
+    generic_pkg = [
+        "isort",
+        "black",
+        "langchain",
+        "python-dotenv",
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "python-dateutil",
+    ]
+    for pkg in generic_pkg:
+        proj_deps.append(pkg)
+
+    # 6 - write file & lock --------------------------------------------
+    pyproject.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+    # `poetry lock` (plain) always creates/updates poetry.lock
+    execute_command("poetry lock", cwd=project_dir)
+    app_logger.info("Poetry project ready (lock file generated).")
+
+# --------------------old--------------------------------------------------------- #
+def _caret_to_pep508_old(spec: str) -> str:
+    """
+    Convert Poetry's caret version (e.g. ^1.3.11) to a valid PEP 508 range:
+    ^X.Y.Z → >=X.Y.Z,<X+1.0.0
+    """
+    if not spec.startswith("^"):
+        return spec
+    ver = spec.lstrip("^").strip()
+    major, *_ = ver.split(".")
+    upper = f"{int(major) + 1}.0.0"
+    return f">={ver},<{upper}"
+# --------------------------------------------------------------------------- #
+
+
+def create_poetry_olders(poetry: Poetry, framework_folder: str | None = None) -> None:
+    import sys, tomlkit
+
+    project_dir = Path(poetry.base_path) / poetry.agent_name
+    app_logger.info("Initialising Poetry project in %s", project_dir)
+    execute_command(f"poetry new {project_dir}", cwd=poetry.base_path)
+
+    pyproject = project_dir / "pyproject.toml"
+    doc = tomlkit.parse(pyproject.read_text())
+
+    # ----- ensure tables ------------------------------------------------
+    project_tbl = doc.setdefault("project", tomlkit.table())
+    tool_tbl    = doc.setdefault("tool", tomlkit.table())
+    poetry_tbl  = tool_tbl.setdefault("poetry", tomlkit.table())
+
+    proj_deps = project_tbl.setdefault("dependencies", tomlkit.array())
+    po_deps   = poetry_tbl.setdefault("dependencies", tomlkit.table())
+
+    # ----- python + author ---------------------------------------------
+    host_py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    project_tbl["requires-python"] = f">={host_py},<4.0"
+    po_deps["python"]              = f">={host_py},<4.0"
+
+    author_it = tomlkit.inline_table()
+    author_it["name"] = poetry.author_name
+    if poetry.author_email:
+        author_it["email"] = poetry.author_email
+    project_tbl["authors"] = [author_it]
+    poetry_tbl["authors"]  = [f"{poetry.author_name} <{poetry.author_email}>"]
+
+    # ----- framework fragment -----------------------------------------
+    if framework_folder:
+        frag = ASSETS_FOLDER / "frameworks" / framework_folder / "pyproject.fragment.toml"
+        if frag.exists():
+            frag_doc  = tomlkit.parse(frag.read_text())
+            frag_deps = frag_doc["tool"]["poetry"].get("dependencies", {})
+
+            for name, spec in frag_deps.items():
+                # PEP 621 list: convert caret to PEP 508
+                proj_deps.append(f"{name} {_caret_to_pep508(spec)}")
+            po_deps.update(frag_deps)  # legacy keeps caret
+
+            # copy extra tool.* tables
+            for sect, val in frag_doc["tool"].items():
+                if sect != "poetry":
+                    tool_tbl[sect] = val
+
+    # ----- generic bundle (skip duplicates) ----------------------------
+    generic_pkg = [
+        "isort",
+        "black",
+        "langchain",
+        "python-dotenv",
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "python-dateutil",
+    ]
+    existing = {dep.split()[0] for dep in proj_deps}
+    for pkg in generic_pkg:
+        if pkg not in existing:
+            proj_deps.append(pkg)
+
+    # ----- write & lock ------------------------------------------------
+    pyproject.write_text(tomlkit.dumps(doc))
+    execute_command("poetry lock", cwd=project_dir)
+    app_logger.info("Poetry project ready (lock file generated).")
+
+# --------------------------------------------------------------------------- #
+def _caret_to_pep508(spec: str) -> str:
+    """Convert ^X.Y.Z → >=X.Y.Z,<X+1.0.0 for PEP 508 lists."""
+    if not spec.startswith("^"):
+        return spec
+    ver = spec[1:].strip()
+    major = int(ver.split(".")[0])
+    return f">={ver},<{major+1}.0.0"
+# --------------------------------------------------------------------------- #
+
+def create_poetry(poetry: Poetry, framework_folder: str | None = None) -> None:
+    import sys, tomlkit
+
+    project_dir = Path(poetry.base_path) / poetry.agent_name
+    app_logger.info("Initialising Poetry project in %s", project_dir)
+
+    # 1) Bootstrap
+    execute_command(f"poetry new {project_dir}", cwd=poetry.base_path)
+    pyproject = project_dir / "pyproject.toml"
+    doc = tomlkit.parse(pyproject.read_text(encoding="utf-8"))
+
+    # 2) Tables
+    project_tbl = doc.setdefault("project", tomlkit.table())
+    tool_tbl    = doc.setdefault("tool",    tomlkit.table())
+    poetry_tbl  = tool_tbl.setdefault("poetry", tomlkit.table())
+
+    proj_deps = project_tbl.setdefault("dependencies", tomlkit.array())
+    po_deps   = poetry_tbl.setdefault("dependencies",  tomlkit.table())
+
+    # 3) Python requirement
+    if framework_folder == "watsonx":
+        # Watsonx.ai only supports <3.13
+        python_spec = ">=3.10,<3.13"
     else:
-        app_logger.error("pyproject.toml not found.")
+        host_py     = f"{sys.version_info.major}.{sys.version_info.minor}"
+        python_spec = f">={host_py},<4.0"
 
-def create_configs_folder(configs: Configs) -> None:
-    app_logger.info(f"Copying configs from `{configs.from_path}` to `{configs.to_path}`")
-    shutil.copytree(configs.from_path, configs.to_path)
-    copy_and_substitute(configs.to_path / "logger.py", None, AGENT_NAME=configs.agent_name)
+    project_tbl["requires-python"] = python_spec
+    po_deps["python"]              = python_spec
 
-def create_model_folder(configs: Configs) -> None:
-    app_logger.info(f"Copying model folder from `{configs.from_path}` to `{configs.to_path}`")
-    shutil.copytree(configs.from_path, configs.to_path)
+    # 4) Author
+    author_it = tomlkit.inline_table()
+    author_it["name"] = poetry.author_name
+    if poetry.author_email:
+        author_it["email"] = poetry.author_email
+    project_tbl["authors"] = [author_it]
+    poetry_tbl["authors"]  = [f"{poetry.author_name} <{poetry.author_email}>"]
 
-def create_main_file(configs: Configs) -> None:
-    app_logger.info(f"Copying main file from `{configs.from_path}` to `{configs.to_path}`")
-    copy_and_substitute(configs.from_path, configs.to_path, AGENT_NAME=configs.agent_name)
+    # 5) Merge framework fragment
+    if framework_folder:
+        frag_path = (
+            ASSETS_FOLDER
+            / "frameworks"
+            / framework_folder
+            / "pyproject.fragment.toml"
+        )
+        if frag_path.exists():
+            frag_doc  = tomlkit.parse(frag_path.read_text(encoding="utf-8"))
+            frag_deps = frag_doc["tool"]["poetry"].get("dependencies", {})
+
+            # PEP 621: convert caret 
+            for name, spec in frag_deps.items():
+                if name == "python":
+                    # already handled above
+                    continue
+                proj_deps.append(f"{name} {_caret_to_pep508(spec)}")
+
+            # legacy: keep original caret
+            po_deps.update(frag_deps)
+
+            # copy additional [tool.*] sections (e.g. isort, black)
+            for sect, val in frag_doc["tool"].items():
+                if sect != "poetry":
+                    tool_tbl[sect] = val
+
+    # 6) Generic bundle (no langgraph here – it lives in its fragment)
+    generic = [
+        "isort",
+        "black",
+        "langchain",
+        "python-dotenv",
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "python-dateutil",
+    ]
+    existing = {dep.split()[0] for dep in proj_deps}
+    for pkg in generic:
+        if pkg not in existing:
+            proj_deps.append(pkg)
+
+    # 7) Write & lock
+    pyproject.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+    # `poetry lock` writes poetry.lock (no --no-update needed)
+    execute_command("poetry lock", cwd=project_dir)
+    app_logger.info("Poetry project ready (lock file generated).")
 
 
 
-def update_agents_json(agent_name: str, agent_port: int, agent_description: str, base_path: Path) -> None:
-    """
-    Append the new agent details to agents.json. If the file doesn't exist, create it.
-    """
+# --------------------------------------------------------------------------- #
+def create_configs_folder(cfg: Configs) -> None:
+    app_logger.info(f"Copying configs → {cfg.to_path}")
+    shutil.copytree(cfg.from_path, cfg.to_path)
+    copy_and_substitute(cfg.to_path / "logger.py", None, AGENT_NAME=cfg.agent_name)
+
+
+def create_model_folder(cfg: Configs) -> None:
+    app_logger.info(f"Copying model folder → {cfg.to_path}")
+    shutil.copytree(cfg.from_path, cfg.to_path)
+
+
+def create_main_file(cfg: Configs) -> None:
+    app_logger.info(f"Copying main.py → {cfg.to_path}")
+    copy_and_substitute(cfg.from_path, cfg.to_path, AGENT_NAME=cfg.agent_name)
+
+# --------------------------------------------------------------------------- #
+# 3 · JSON registry of all generated agents
+# --------------------------------------------------------------------------- #
+def update_agents_json(
+    agent_name: str, agent_port: int, description: str, base_path: Path
+) -> None:
     agents_file = base_path / "agents.json"
-    agent_data = {
+    record = {
         "name": agent_name,
-        "description": agent_description,
+        "description": description,
         "port": agent_port,
         "host": "localhost",
         "repo": f"https://github.com/watsonx-agents/agent_{agent_name}",
         "status": "stopped",
-        "pid": None
+        "pid": None,
     }
 
-    # Load existing data or initialize new structure
+    data = {"agents": []}
     if agents_file.exists():
-        with open(agents_file, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    else:
-        data = {"agents": []}
+        import json
 
-    # Append the new agent data
-    data["agents"].append(agent_data)
+        data = json.loads(agents_file.read_text(encoding="utf-8"))
 
-    # Write the updated data back to the JSON file
-    with open(agents_file, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    data["agents"].append(record)
+    agents_file.write_text(
+        __import__("json").dumps(data, indent=4), encoding="utf-8"
+    )
+    app_logger.info(f"Registered {agent_name} in agents.json")
 
-    app_logger.info(f"Agent '{agent_name}' added to agents.json")
+# --------------------------------------------------------------------------- #
+# 4 · Core project-creation routine
+# --------------------------------------------------------------------------- #
+def create_project(arguments: Arguments, framework_folder: str) -> None:
+    # Use ./agents unless caller supplied a custom --agent-path
+    if str(arguments.agent_path) == str(DEFAULT_AGENT_BASE_PATH):
+        arguments.agent_path = str(Path.cwd() / "agents")
 
-def create_project(arguments: Arguments) -> None:
-    # Ensure the base agent path is valid. If not, create it.
-    base_path = Path(arguments.agent_path).resolve()
-    if not base_path.exists():
-        app_logger.info(f"The path {base_path} does not exist. Creating it...")
-        base_path.mkdir(parents=True, exist_ok=True)
+    base_path = Path(arguments.agent_path).expanduser().resolve()
+    base_path.mkdir(parents=True, exist_ok=True)
 
     agent_folder = base_path / arguments.agent_name
-    agent_poetry_folder = agent_folder / arguments.agent_name
-    agent_poetry_real_folder = agent_folder / "app"
-
-    from_dockerfile: Path = ASSETS_FOLDER / "Dockerfile"
-    to_dockerfile: Path = agent_folder / "Dockerfile"
-
-    from_compose: Path = ASSETS_FOLDER / "compose.yaml"
-    to_compose: Path = agent_folder / "compose.yaml"
-
-    from_readme: Path = ASSETS_FOLDER / "README.md"
-    to_readme: Path = agent_folder / "README.md"
-
-    from_gitignore: Path = ASSETS_FOLDER / ".gitignore"
-    to_gitignore: Path = agent_folder / ".gitignore"
-
-    from_env: Path = ASSETS_FOLDER / ".env.sample"
-    to_env: Path = agent_folder / ".env.sample"
-
-    from_configs = ASSETS_FOLDER / "configs"
-    to_configs = agent_poetry_real_folder / arguments.agent_name / "configs"
-
-    from_model = ASSETS_FOLDER / "model"
-    to_model = agent_poetry_real_folder / arguments.agent_name / "model"
-
-    from_main = ASSETS_FOLDER / "main.py"
-    to_main = agent_poetry_real_folder / arguments.agent_name / "main.py"
-
-    # check if overwrite is needed
-    overwrite: bool = False
-    if os.path.exists(agent_folder):
-        overwrite = input(f"Overwrite the content of {agent_folder}? [y/N] ").lower() in [
-            "t",
-            "true",
-            "1",
-            "y",
-            "yes",
-            "",
-        ]
-        if overwrite:
-            app_logger.info(f"Deleting {agent_folder}")
-            shutil.rmtree(agent_folder)
-    else:
-        overwrite = True
-
-    # Abort if user chooses not to overwrite
-    if not overwrite:
-        app_logger.info(f"Aborting. Not writing agent in {agent_folder}")
-        return
-
     app_logger.info(f"Writing agent in {agent_folder}")
-    os.makedirs(agent_folder, exist_ok=overwrite)
-    create_dockerfile(Dockerfile(from_dockerfile, to_dockerfile, arguments.agent_name))
+
+    # 4-A source ↦ target mappings
+    agent_poetry_folder = agent_folder / arguments.agent_name      # tmp
+    agent_poetry_real   = agent_folder / "app"                     # final
+
+    paths = {
+        "dockerfile": (ASSETS_FOLDER / "Dockerfile", agent_folder / "Dockerfile"),
+        "compose":    (ASSETS_FOLDER / "compose.yaml", agent_folder / "compose.yaml"),
+        "readme":     (ASSETS_FOLDER / "README.md",     agent_folder / "README.md"),
+        "gitignore":  (ASSETS_FOLDER / ".gitignore",    agent_folder / ".gitignore"),
+        "env":        (ASSETS_FOLDER / ".env.sample",   agent_folder / ".env.sample"),
+        "configs":    (
+            ASSETS_FOLDER / "configs",
+            agent_poetry_real / arguments.agent_name / "configs",
+        ),
+        "model":      (
+            ASSETS_FOLDER / "model",
+            agent_poetry_real / arguments.agent_name / "model",
+        ),
+        "main":       (
+            ASSETS_FOLDER / "main.py",
+            agent_poetry_real / arguments.agent_name / "main.py",
+        ),
+    }
+
+    # Overwrite guard
+    if agent_folder.exists():
+        confirm = input(f"{agent_folder} exists. Overwrite? [y/N]: ").lower()
+        if confirm not in ("y", "yes"):
+            app_logger.info("Aborting.")
+            return
+        shutil.rmtree(agent_folder)
+
+    agent_folder.mkdir(parents=True, exist_ok=True)
+
+    # 4-B create files
+    create_dockerfile(Dockerfile(*paths["dockerfile"], arguments.agent_name))
     create_compose(
         Compose(
-            from_compose,
-            to_compose,
-            arguments.agent_name,
-            arguments.host_port,
-            arguments.agent_port,
+            *paths["compose"],
+            agent_name=arguments.agent_name,
+            host_port=arguments.host_port,
+            agent_port=arguments.agent_port,
         )
     )
     create_readme(
         Readme(
-            from_readme,
-            to_readme,
+            *paths["readme"],
             agent_name=arguments.agent_name,
             agent_path=str(agent_folder),
             host_port=arguments.host_port,
@@ -353,41 +612,68 @@ def create_project(arguments: Arguments) -> None:
             author_email=arguments.author_email,
         )
     )
-    create_gitignore(ProjectFile(from_gitignore, to_gitignore))
-    create_env(Env(from_env, to_env, arguments.agent_port))
-    create_poetry(Poetry(base_path=agent_folder, agent_name=arguments.agent_name, author_name=arguments.author_name, author_email=arguments.author_email))
-    agent_poetry_folder.rename(agent_poetry_real_folder)
-    create_configs_folder(Configs(from_configs, to_configs, agent_name=arguments.agent_name))
-    create_model_folder(Configs(from_model, to_model, agent_name=arguments.agent_name))
-    create_main_file(Configs(from_main, to_main, agent_name=arguments.agent_name))
-    app_logger.info("Formatting files...")
-    execute_command(f"isort {agent_poetry_real_folder}")
-    execute_command(f"black {agent_poetry_real_folder}")
+    create_gitignore(ProjectFile(*paths["gitignore"]))
+    create_env(Env(*paths["env"], arguments.agent_port))
+    create_poetry(
+        Poetry(
+            base_path=agent_folder,
+            agent_name=arguments.agent_name,
+            author_name=arguments.author_name,
+            author_email=arguments.author_email,
+        ),
+        framework_folder=framework_folder,       # ← forward it!
+    )
 
+    # Poetry scaffold comes out in <agent_folder>/<agent_name>/… ;
+    # rename it to <agent_folder>/app for cleaner docker image
+    agent_poetry_folder.rename(agent_poetry_real)
 
-def main():
+    create_configs_folder(Configs(*paths["configs"], agent_name=arguments.agent_name))
+    create_model_folder(Configs(*paths["model"],   agent_name=arguments.agent_name))
+    create_main_file  (Configs(*paths["main"],    agent_name=arguments.agent_name))
+
+    # Black / isort
+    app_logger.info("Formatting generated code…")
+    execute_command(f"isort {agent_poetry_real}")
+    execute_command(f"black {agent_poetry_real}")
+
+    # Finally add to agents.json
+    update_agents_json(
+        arguments.agent_name,
+        arguments.agent_port,
+        f"Agent generated from {arguments.agent_name}",
+        base_path,
+    )
+
+# --------------------------------------------------------------------------- #
+# 5 · CLI
+# --------------------------------------------------------------------------- #
+def main() -> None:
     try:
-        # -------------------------------------------------------------------------
-        # New Step: Framework Selection, Setup, and Optional Model Customization
-        # -------------------------------------------------------------------------
-        framework = select_framework()
-        setup_framework(framework)
-        customize_model(framework)
-        
-        # Continue with parsing arguments and creating the project
-        arguments: Arguments = parse_arguments()
-        create_project(arguments)
-        app_logger.info(f"Success! Agent {arguments.agent_name} created in {arguments.agent_path}")
+        framework_ui = select_framework()
+        framework_folder = _folder_from_framework(framework_ui)
 
- 
+        setup_framework(framework_ui)
+        customize_model(framework_ui)
 
+        args = parse_arguments()
+        create_project(args, framework_folder)   # ← pass it!
+
+        app_logger.info(
+            f"✅ Success!  Agent “{args.agent_name}” created in {args.agent_path}"
+        )
     except KeyboardInterrupt:
-        app_logger.info("\nExiting...")
-    except Exception as e:
+        app_logger.info("\nExiting…")
+    except Exception:  # pragma: no cover
         app_logger.error("ERROR!")
         app_logger.error(format_exc())
     finally:
         app_logger.info("Bye bye! 👋😊")
 
+
 if __name__ == "__main__":
     main()
+
+
+
+# --------------------------------------------------------------------------- #
