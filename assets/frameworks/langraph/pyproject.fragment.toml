@@ -1,0 +1,4 @@
+[tool.poetry.dependencies]
+langgraph        = ">=0.3.34"
+langchain-ibm    = "==0.3.10"
+python-dotenv    = ">=0.20.0"

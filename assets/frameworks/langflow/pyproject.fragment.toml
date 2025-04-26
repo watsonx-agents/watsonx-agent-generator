@@ -1,0 +1,4 @@
+[tool.poetry.dependencies]
+# LangFlow’s FastAPI-based playground
+langflow         = "^0.5.1"
+python-dotenv    = ">=1.1.0"

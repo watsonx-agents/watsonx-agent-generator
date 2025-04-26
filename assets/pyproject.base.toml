@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "agent-template"
+version = "0.0.0"
+description = "Base pyproject used by the agent generator"
+authors = []
+
+[tool.poetry.dependencies]
+python = ">=3.12,<4.0"
+
+# Generic runtime deps that every agent tends to need
+fastapi = "^0.110.2"
+uvicorn = "^0.29.0"
+pydantic = "^2.7.0"
+python-dateutil = "^2.9.0.post0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.4"
+isort = "^5.13"
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+
+[build-system]
+requires = ["poetry-core>=1.6.0"]
+build-backend = "poetry.core.masonry.api"
