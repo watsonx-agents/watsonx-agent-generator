@@ -4,8 +4,6 @@ The **WatsonX Agents Hub** project provides a simple and interactive way to gene
 It uses a wizard that collects user requirements and configures a new agent automatically based on a selected framework.
 This tool supports multiple base frameworks and offers the option to customize the agent code using AI-powered logic.
 
----
-
 ## Supported Frameworks
 When generating a new agent, you can choose from the following frameworks:
 
@@ -20,22 +18,22 @@ When generating a new agent, you can choose from the following frameworks:
 
 Choosing a framework stores its extra requirements in
 `assets/frameworks/<framework>/pyproject.fragment.toml`.
+
+```bash
 assets/frameworks//model
 ├── agent.py
 └── init.py
-
+```
 
 If you select **no framework**, the wizard uses `assets/frameworks/base`.
 
----
+
 
 ## Agent Customization
 After selecting a framework and setting up the base model files, the wizard offers an optional customization step.
 
 * **YES** ⇒ you describe a new task → `agent_creator/generator.py` rewrites the original `agent.py` with help of Granite LLM → result saved as **`agent_custom.py`**.
 * **NO** ⇒ the default `agent.py` remains unchanged.
-
----
 
 ## ▶ **NEW – Dependency & Lock-file Handling**
 
@@ -44,7 +42,7 @@ After selecting a framework and setting up the base model files, the wizard offe
 * **Framework fragments** are merged automatically — caret (`^`) versions are converted to PEP 508 ranges for the `[project]` list but retained in the legacy table.
 * The wizard calls `poetry lock`, guaranteeing a reproducible environment before you ever `cd` into the agent.
 
----
+
 
 ## Pipeline Overview
 
@@ -78,7 +76,7 @@ The complete pipeline of the agent-creation process works as follows:
 
    ```bash
    git clone [https://github.com/watsonx-agents/watsonx-agent-generator](https://github.com/watsonx-agents/watsonx-agent-generator)
-````
+   ````
 
 2.  **Create and Activate a Python Virtual Environment**
 
@@ -103,8 +101,6 @@ The complete pipeline of the agent-creation process works as follows:
     A new repository will be created under the GitHub organization (with a name such as `agent_<agent_name>`),
     and the `agents.json` file will be updated with your new agent details.
 
-
-
 ▶ **NEW – Quick “inside the agent” tour**
 After generation:
 
@@ -116,8 +112,6 @@ poetry run uvicorn <agent_name>.main:app --reload
 
 Visit http://localhost:\<agent\_port\>/docs to poke the FastAPI endpoint.
 All environment variables live in the agent’s .env; secrets never leak into git.
-
-
 
 ## Example of a Generated Agent Structure
 
